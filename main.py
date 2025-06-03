@@ -4,8 +4,8 @@ import threading
 import time
 from typing import Literal
 import cv2
-import numpy as np  # For image manipulation and argmax
-import onnxruntime  # For ONNX model inference
+import numpy as np
+import onnxruntime
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -16,23 +16,33 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QPushButton,
     QMessageBox,
-    # QFrame,
     QSpacerItem,
     QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QScreen
-
 from datetime import datetime
 import os
 
 
-# --- PyQt6 Application Class ---
 class ModernMentalHealthSurveyApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mental Health Quick Check")
-        # self.setGeometry(150, 150, 600, 550)
+
+        # --- Define Log Directory ---
+        self.log_directory = "logs"
+        try:
+            os.makedirs(self.log_directory, exist_ok=True)  # Create if it doesn't exist
+            print(
+                f"Logs will be saved in directory: '{os.path.abspath(self.log_directory)}'"
+            )
+        except OSError as e:
+            print(
+                f"Error creating log directory '{self.log_directory}': {e}. Logs will be saved in current directory."
+            )
+            # Fallback to current directory if creation fails
+            self.log_directory = "."
 
         # --- ONNX Model Configuration (USER ACTION REQUIRED) ---
         self.onnx_model_path = "model.onnx"
@@ -81,11 +91,24 @@ class ModernMentalHealthSurveyApp(QWidget):
         self.current_question_index = 0
         self.user_answers = [None] * self.num_questions
 
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file_name = f"survey_log_{timestamp_str}.json"
-        print(f"Current session log file: {self.log_file_name}")
+        # Generate unique log filenames for this session
+        base_timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Adding milliseconds to prediction log for higher chance of uniqueness if app restarts very quickly
+        # prediction_timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
-        self._log_event(action_type="passive", event_type="app_init")
+        self.survey_log_file_name = os.path.join(
+            self.log_directory, f"survey_log_{base_timestamp_str}.json"
+        )
+        self.prediction_log_file_name = os.path.join(
+            self.log_directory, f"prediction_log_{base_timestamp_str}.json"
+        )
+
+        print(f"Current session survey log file: {self.survey_log_file_name}")
+        print(f"Current session prediction log file: {self.prediction_log_file_name}")
+
+        self._log_event(
+            action_type="passive", event_type="app_init"
+        )  # Logs to survey_log_file_name
 
         self.capture_active = False
         self.capture_thread = None
@@ -100,21 +123,19 @@ class ModernMentalHealthSurveyApp(QWidget):
             action_type="passive",
             event_type="question_displayed",
             details={"question_index": self.current_question_index + 1},
-        )
+        )  # Logs to survey_log_file_name
 
     def _load_onnx_model(self):
+        # ... (same as before) ...
         if not os.path.exists(self.onnx_model_path):
             print(
                 f"ONNX Model Error: File not found at '{self.onnx_model_path}'. Inference will be disabled."
             )
-            # You could show a QMessageBox here if QApplication instance already exists
-            # For now, just printing.
             self.ort_session = None
             return
         try:
             self.ort_session = onnxruntime.InferenceSession(self.onnx_model_path)
             self.input_name = self.ort_session.get_inputs()[0].name
-            # Assuming the first output is the one with class scores/logits
             self.output_name = self.ort_session.get_outputs()[0].name
             print(f"ONNX model '{self.onnx_model_path}' loaded successfully.")
             print(
@@ -122,9 +143,10 @@ class ModernMentalHealthSurveyApp(QWidget):
             )
         except Exception as e:
             print(f"Error loading ONNX model: {e}")
-            self.ort_session = None  # Disable inference if model loading fails
+            self.ort_session = None
 
     def _center_window(self):
+        # ... (same as before) ...
         screen = QApplication.primaryScreen()
         if screen:
             screen_geometry = screen.availableGeometry()
@@ -137,22 +159,23 @@ class ModernMentalHealthSurveyApp(QWidget):
     def _log_event(
         self, action_type: Literal["active", "passive"], event_type: str, details=None
     ):
+        # This logs to self.survey_log_file_name
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         log_entry = {
             "timestamp": timestamp,
             "action_type": action_type,
             "event_type": event_type,
         }
-        if details:  # If details are provided, add them directly
+        if details:
             log_entry["details"] = details
 
         all_logs = []
         try:
             if (
-                os.path.exists(self.log_file_name)
-                and os.path.getsize(self.log_file_name) > 0
+                os.path.exists(self.survey_log_file_name)
+                and os.path.getsize(self.survey_log_file_name) > 0
             ):
-                with open(self.log_file_name, "r", encoding="utf-8") as f:
+                with open(self.survey_log_file_name, "r", encoding="utf-8") as f:
                     all_logs = json.load(f)
                 if not isinstance(all_logs, list):
                     all_logs = []
@@ -165,43 +188,76 @@ class ModernMentalHealthSurveyApp(QWidget):
 
         all_logs.append(log_entry)
         try:
-            with open(self.log_file_name, "w", encoding="utf-8") as f:
+            with open(self.survey_log_file_name, "w", encoding="utf-8") as f:
                 json.dump(all_logs, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Error writing to log file '{self.log_file_name}': {e}")
+            print(
+                f"Error writing to survey log file '{self.survey_log_file_name}': {e}"
+            )
+
+    def _log_image_prediction(
+        self, predicted_label: str, confidence: float, predicted_index: int
+    ):
+        # This new method logs to self.prediction_log_file_name
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        log_entry = {
+            "timestamp": timestamp,
+            "predicted_label": predicted_label,
+            "confidence": round(confidence, 4),
+            "predicted_index": int(predicted_index),
+            # You could add more details here if needed, e.g., raw scores
+        }
+
+        all_predictions = []
+        try:
+            if (
+                os.path.exists(self.prediction_log_file_name)
+                and os.path.getsize(self.prediction_log_file_name) > 0
+            ):
+                with open(self.prediction_log_file_name, "r", encoding="utf-8") as f:
+                    all_predictions = json.load(f)
+                if not isinstance(all_predictions, list):
+                    print(
+                        f"Warning: Prediction log file '{self.prediction_log_file_name}' was not a list. Resetting."
+                    )
+                    all_predictions = []
+            else:  # File doesn't exist yet for this session or is empty
+                all_predictions = []
+        except json.JSONDecodeError:
+            print(
+                f"Warning: Could not decode JSON from '{self.prediction_log_file_name}'. Starting with a new prediction log list."
+            )
+            all_predictions = []
+        except Exception as e:
+            print(
+                f"Error reading prediction log file '{self.prediction_log_file_name}': {e}. Starting with a new list."
+            )
+            all_predictions = []
+
+        all_predictions.append(log_entry)
+
+        try:
+            with open(self.prediction_log_file_name, "w", encoding="utf-8") as f:
+                json.dump(all_predictions, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(
+                f"Error writing to prediction log file '{self.prediction_log_file_name}': {e}"
+            )
 
     def _preprocess_image(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Preprocesses an image frame for ONNX model inference.
-        Assumes common preprocessing: BGR_to_RGB, resize, normalize [0,1], HWC_to_CHW, batch.
-        Adjust this function based on your specific model's requirements.
-        """
-        # 1. Resize
-        img = cv2.resize(frame, self.input_size)  # self.input_size is (height, width)
-
-        # 2. BGR to RGB
+        # ... (same as before, with mean/std normalization) ...
+        img = cv2.resize(frame, self.input_size)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # 3. Convert to float32 and scale to [0, 1]
         img = img.astype(np.float32) / 255.0
-
-        # 4. Normalize with mean and std
-        # These are typically for RGB channels
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-        # Ensure mean and std are broadcastable to img (H, W, C)
-        # img shape is (height, width, 3) at this point
         img = (img - mean) / std
-
-        # 5. HWC to CHW (Height, Width, Channel to Channel, Height, Width)
-        img = np.transpose(img, (2, 0, 1))  # C, H, W
-
-        # 6. Add batch dimension (1, C, H, W)
+        img = np.transpose(img, (2, 0, 1))
         img = np.expand_dims(img, axis=0)
         return img
 
     def _start_webcam_capture(self):
+        # ... (same as before) ...
         if self.capture_thread is None:
             self.capture_active = True
             self.capture_thread = threading.Thread(
@@ -211,6 +267,7 @@ class ModernMentalHealthSurveyApp(QWidget):
             print("Webcam capture thread started.")
 
     def _webcam_capture_loop(self):
+        # ... (modified to call _log_image_prediction) ...
         cap = None
         try:
             cap = cv2.VideoCapture(0)
@@ -223,46 +280,27 @@ class ModernMentalHealthSurveyApp(QWidget):
             while self.capture_active:
                 ret, frame = cap.read()
                 if ret:
-                    # print(f"{datetime.now()}: Webcam frame captured successfully.") # Optional: reduce console spam
-                    if self.ort_session:  # Perform inference if model is loaded
+                    if self.ort_session:
                         try:
-                            preprocessed_frame = self._preprocess_image(
-                                frame.copy()
-                            )  # Use a copy
-
+                            preprocessed_frame = self._preprocess_image(frame.copy())
                             ort_inputs = {self.input_name: preprocessed_frame}
                             ort_outs = self.ort_session.run(
                                 [self.output_name], ort_inputs
                             )
-
-                            # Assuming ort_outs[0] is the scores/logits for classification
-                            # Output shape might be (1, num_classes)
-                            scores = ort_outs[0][
-                                0
-                            ]  # Get the scores for the single image in the batch
+                            scores = ort_outs[0][0]
                             predicted_index = np.argmax(scores)
-                            confidence = float(
-                                scores[predicted_index]
-                            )  # Or use softmax if output is logits
-
+                            confidence = float(scores[predicted_index])
                             predicted_label = "Unknown"
                             if 0 <= predicted_index < len(self.class_labels):
                                 predicted_label = self.class_labels[predicted_index]
 
-                            print(
-                                f"{datetime.now()}: Predicted Label: {predicted_label} (Confidence: {confidence:.2f})"
+                            # print(f"{datetime.now()}: Predicted Label: {predicted_label} (Confidence: {confidence:.2f})") # Optional console print
+
+                            # Log to the dedicated prediction log file
+                            self._log_image_prediction(
+                                predicted_label, confidence, predicted_index
                             )
 
-                            self._log_event(
-                                action_type="passive",
-                                event_type="image_prediction",
-                                details={
-                                    "predicted_label": predicted_label,
-                                    "confidence": round(confidence, 4),
-                                    "predicted_index": int(predicted_index),
-                                    # Optional: "all_scores": [round(float(s), 4) for s in scores]
-                                },
-                            )
                         except Exception as e:
                             print(
                                 f"{datetime.now()}: Error during model inference: {e}"
@@ -272,12 +310,10 @@ class ModernMentalHealthSurveyApp(QWidget):
                         f"{datetime.now()}: Error: Failed to capture frame from webcam."
                     )
 
-                for _ in range(
-                    10
-                ):  # Check active flag frequently for responsive shutdown
+                for _ in range(10):
                     if not self.capture_active:
                         break
-                    time.sleep(0.1)  # Total ~1 second effective sleep
+                    time.sleep(0.1)
         except Exception as e:
             print(f"{datetime.now()}: Exception in webcam loop: {e}")
         finally:
@@ -289,10 +325,11 @@ class ModernMentalHealthSurveyApp(QWidget):
             self.capture_active = False
 
     def _stop_webcam_capture(self):
+        # ... (same as before) ...
         print("Attempting to stop webcam capture thread...")
         self.capture_active = False
         if self.capture_thread and self.capture_thread.is_alive():
-            self.capture_thread.join(timeout=2.5)  # Increased timeout slightly
+            self.capture_thread.join(timeout=2.5)
             if self.capture_thread.is_alive():
                 print("Webcam capture thread did not stop in time.")
             else:
@@ -300,7 +337,7 @@ class ModernMentalHealthSurveyApp(QWidget):
         self.capture_thread = None
 
     def init_ui(self):
-        # ... (UI setup - same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (UI setup - same as before) ...
         self.setObjectName("MainWindow")
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(20, 20, 20, 20)
@@ -363,7 +400,7 @@ class ModernMentalHealthSurveyApp(QWidget):
         self.resize(600, 550)
 
     def apply_styles(self):
-        # ... (QSS - same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (QSS - same as before) ...
         qss = """
             QWidget#MainWindow { background-color: #F4F6F8; font-family: 'Segoe UI', Arial, sans-serif; }
             QLabel#DisclaimerLabel { background-color: #FFF3CD; color: #664D03; border: 1px solid #FFECB5; border-radius: 6px; padding: 12px; font-size: 9pt; font-weight: normal; }
@@ -376,7 +413,7 @@ class ModernMentalHealthSurveyApp(QWidget):
             QRadioButton::indicator:unchecked { border: 2px solid #A0AEC0; border-radius: 9px; background-color: #FFFFFF; }
             QRadioButton::indicator:unchecked:hover { border: 2px solid #718096; }
             QRadioButton::indicator:checked { border: 2px solid #3182CE; border-radius: 9px; background-color: #3182CE; }
-            QRadioButton::indicator:checked::after { content: ""; display: block; width: 8px; height: 8px; margin: 3px; border-radius: 4px; background-color: white; }
+            /* QRadioButton::indicator:checked::after { content: ""; display: block; width: 8px; height: 8px; margin: 3px; border-radius: 4px; background-color: white; } */
             QPushButton { font-size: 11pt; font-weight: bold; padding: 10px 20px; border-radius: 6px; border: none; min-width: 100px; }
             QPushButton#NextButton { background-color: #3182CE; color: white; }
             QPushButton#NextButton:hover { background-color: #2B6CB0; }
@@ -393,7 +430,7 @@ class ModernMentalHealthSurveyApp(QWidget):
         self.setStyleSheet(qss)
 
     def display_question(self):
-        # ... (same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (same as before) ...
         for button in self.radio_button_group.buttons():
             self.radio_button_group.removeButton(button)
             button.deleteLater()
@@ -428,7 +465,7 @@ class ModernMentalHealthSurveyApp(QWidget):
             self.process_survey()
 
     def _handle_option_toggled(self, checked, question_idx, option_text):
-        # ... (same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (same as before, logs to survey_log_file_name) ...
         if checked:
             self._log_event(
                 action_type="active",
@@ -441,7 +478,7 @@ class ModernMentalHealthSurveyApp(QWidget):
             self.user_answers[question_idx] = option_text
 
     def go_next(self):
-        # ... (same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (same as before, logs to survey_log_file_name) ...
         current_q_idx_for_log = self.current_question_index + 1
         action_text = (
             "next_clicked" if self.next_button.text() == "Next" else "finish_clicked"
@@ -476,7 +513,7 @@ class ModernMentalHealthSurveyApp(QWidget):
             self.process_survey()
 
     def go_previous(self):
-        # ... (same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (same as before, logs to survey_log_file_name) ...
         current_q_idx_for_log = self.current_question_index + 1
         self._log_event(
             action_type="active",
@@ -486,14 +523,15 @@ class ModernMentalHealthSurveyApp(QWidget):
         if self.current_question_index > 0:
             self.current_question_index -= 1
             self.display_question()
+            # Corrected action_type for question_displayed on previous
             self._log_event(
-                action_type="active",
+                action_type="passive",
                 event_type="question_displayed",
                 details={"question_index": self.current_question_index + 1},
-            )  # Should be passive
+            )
 
     def process_survey(self):
-        # ... (same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (same as before, logs to survey_log_file_name) ...
         self._log_event(action_type="passive", event_type="survey_submitted")
         if any(answer is None for answer in self.user_answers):
             QMessageBox.warning(
@@ -548,18 +586,20 @@ class ModernMentalHealthSurveyApp(QWidget):
         self.close()
 
     def closeEvent(self, event):
-        # ... (same as your previous ModernMentalHealthSurveyApp) ...
+        # ... (same as before, logs to survey_log_file_name) ...
         self._stop_webcam_capture()
-        self._log_event(action_type="passive", event_type="application_closed")
+        self._log_event(
+            action_type="passive", event_type="application_closed"
+        )  # This logs to survey_log
         print(
-            f"Application closed. Log for this session saved to '{self.log_file_name}'."
+            f"Application closed. Survey log: '{self.survey_log_file_name}', Prediction log: '{self.prediction_log_file_name}'."
         )
         event.accept()
 
 
-# --- Function to Display Log (Outside the App Class) ---
+# --- Function to Display Survey Log (Outside the App Class) ---
 def display_survey_log(log_file_name):
-    # ... (same as your previous ModernMentalHealthSurveyApp) ...
+    # ... (same as before) ...
     print(
         f"\n--- Attempting to Display Survey Interaction Log from '{log_file_name}' ---"
     )
@@ -600,8 +640,48 @@ def display_survey_log(log_file_name):
         )
 
 
+# --- New Function to Display Prediction Log ---
+def display_prediction_log(log_file_name):
+    """
+    Reads a specific JSON prediction log file and prints its content to the console.
+    """
+    print(
+        f"\n--- Attempting to Display Image Prediction Log from '{log_file_name}' ---"
+    )
+    try:
+        if not os.path.exists(log_file_name) or os.path.getsize(log_file_name) == 0:
+            print(f"Prediction log file '{log_file_name}' not found or is empty.")
+            return
+
+        with open(log_file_name, "r", encoding="utf-8") as f:
+            predictions = json.load(f)
+
+        if not isinstance(predictions, list) or not predictions:
+            print(f"No valid predictions found in the JSON file: {log_file_name}.")
+            return
+
+        print(f"\nImage Prediction Log from '{log_file_name}':")
+        print("-" * 60)
+        print(f"{'Timestamp':<25} | {'Predicted Label':<20} | {'Confidence':<10}")
+        print("-" * 60)
+        for entry in predictions:
+            ts = entry.get("timestamp", "N/A")
+            label = entry.get("predicted_label", "N/A")
+            confidence = entry.get("confidence", "N/A")
+            print(f"{ts:<25} | {label:<20} | {confidence:<10.4f}")
+        print("-" * 60)
+
+    except json.JSONDecodeError:
+        print(
+            f"Error: Could not decode JSON from prediction log '{log_file_name}'. The file might be corrupted."
+        )
+    except Exception as e:
+        print(
+            f"An unexpected error occurred while displaying prediction logs from '{log_file_name}': {e}"
+        )
+
+
 if __name__ == "__main__":
-    # ... (same as your previous ModernMentalHealthSurveyApp) ...
     run_application = True
     if run_application:
         app_instance = QApplication(sys.argv)
@@ -609,13 +689,15 @@ if __name__ == "__main__":
         survey_app.show()
         exit_code = app_instance.exec()
         if exit_code == 0:
-            print(
-                f"\nApplication finished. Displaying log for session: {survey_app.log_file_name}"
-            )
-            display_survey_log(survey_app.log_file_name)
+            print(f"\nApplication finished.")
+            display_survey_log(survey_app.survey_log_file_name)
+            display_prediction_log(
+                survey_app.prediction_log_file_name
+            )  # Display prediction log as well
         sys.exit(exit_code)
     else:
-        print(
-            "To display logs, please specify a log file name or run the application with run_application = True."
-        )
+        # Example: Manually display logs if app is not run
+        # display_survey_log("survey_log_YYYYMMDD_HHMMSS.json")
+        # display_prediction_log("prediction_log_YYYYMMDD_HHMMSS_ffffff.json")
+        print("Set run_application = True to run the survey.")
         sys.exit(0)
