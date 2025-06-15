@@ -1,11 +1,17 @@
 import cv2
 
 MODEL_NAME = "mnasnet_small.lamb_in1k"
-MODEL_PATH = "model.onnx"
+MODEL_PATH = "LMP_2019_model.onnx"
 HAAR_CASCADE_PATH = "haarcascade_frontalface_default.xml"
 CLASS_NAMES = [
-    "anger", "contempt", "disgust", "embarrass", "fear",
-    "joy", "neutral", "pride", "sadness", "surprise"
+    "anger",
+    "contempt",
+    "disgust",
+    "fear",
+    "joy",
+    "neutral",
+    "sadness",
+    "surprise",
 ]
 WINDOW_TITLE = "Deteksi Emosi (Timm Preprocessing)"
 WINDOW_WIDTH = 800

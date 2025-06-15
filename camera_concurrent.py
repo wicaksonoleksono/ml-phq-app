@@ -4,52 +4,31 @@ import numpy as np
 import onnxruntime
 import time
 import timm
+import mediapipe as mp
 from torchvision import transforms
 from PIL import Image
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QLabel, QVBoxLayout
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QImage, QPixmap
-import config as cfg
+import config as cfg  # Asumsikan file config.py Anda ada
 
 
 def softmax(x):
+    """Menghitung softmax untuk array numpy."""
     e_x = np.exp(x - np.max(x))
     return e_x / e_x.sum(axis=0)
 
 
 def create_timm_transform(model_name: str):
-    print(f"Applying timm-recommended transforms for '{model_name}' model.")
+    """
+    Membuat pipeline transformasi dari timm dan menambahkan konversi Grayscale.
+    """
     model = timm.create_model(model_name, pretrained=False)
     data_cfg = timm.data.resolve_model_data_config(model)
     transform = timm.data.create_transform(**data_cfg, is_training=False)
-
-    # 1. Define the same grayscale mean and std used during training
-    # GRAYSCALE_MEAN = (0.5,)
-    # GRAYSCALE_STD = (0.5,)
-
-    # # 2. Insert the Grayscale transform at the beginning of the pipeline
     # transform.transforms.insert(0, transforms.Grayscale(num_output_channels=3))
-
-    # # 3. Find and replace the default ImageNet normalization with our grayscale normalization
-    # for i, t in enumerate(transform.transforms):
-    #     if isinstance(t, transforms.Normalize):
-    #         transform.transforms[i] = transforms.Normalize(mean=GRAYSCALE_MEAN, std=GRAYSCALE_STD)
-    #         print("Successfully replaced default normalization with grayscale normalization.")
-    #         break
-
-    print("\n--- Final Inference Transforms (Consistent Grayscale Norm) ---")
-    print(transform)
-    print("-----------------------------------------------------------\n")
-    input_size = data_cfg['input_size']
-    del model
-    return transform, (input_size[1], input_size[2])
-
-
-def create_timm_transform(model_name: str):
-    model = timm.create_model(model_name, pretrained=False)
-    data_cfg = timm.data.resolve_model_data_config(model)
-    transform = timm.data.create_transform(**data_cfg, is_training=False)
+    print("✅ Pipeline transformasi yang digunakan:")
     print(transform)
 
     input_size = data_cfg['input_size']
@@ -68,34 +47,38 @@ class CameraWindow(QMainWindow):
         self.last_known_predictions = {}
         try:
             self.transform, self.input_size = create_timm_transform(cfg.MODEL_NAME)
-            self.input_width, self.input_height = self.input_size
-
             self.ort_session = onnxruntime.InferenceSession(cfg.MODEL_PATH)
             self.input_name = self.ort_session.get_inputs()[0].name
-            model_input_shape = self.ort_session.get_inputs()[0].shape
-            if model_input_shape[-2:] != self.input_size:
-                print(
-                    f"⚠️ Warning: ONNX model input shape {model_input_shape[-2:]} differs from timm recommended size {self.input_size}.")
+            output_shape = self.ort_session.get_outputs()[0].shape
+            jumlah_kelas = output_shape[1]  # Asumsi bentuk output adalah [batch_size, num_classes]
+            print(f"✅ Model ini memiliki {jumlah_kelas} kelas output.")
+            # -----------------------------
 
             print(f"✅ Model Emosi ONNX '{cfg.MODEL_PATH}' berhasil dimuat.")
-            print(f"✅ Transforms for '{cfg.MODEL_NAME}' created with input size {self.input_size}.")
+            print(f"✅ Model Emosi ONNX '{cfg.MODEL_PATH}' berhasil dimuat.")
 
         except Exception as e:
-            print(f"❌ Gagal memuat model atau membuat transformasi: {e}")
+            print(f"❌ Gagal memuat model atau transformasi: {e}")
             return
-
         try:
             self.face_cascade = cv2.CascadeClassifier(cfg.HAAR_CASCADE_PATH)
-            print(f"✅ Classifier Wajah '{cfg.HAAR_CASCADE_PATH}' berhasil dimuat.")
-        except Exception as e:
-            print(f"❌ Gagal memuat Haar Cascade: {e}")
-            return
+            print(f"✅ Classifier Wajah (Haar) '{cfg.HAAR_CASCADE_PATH}' berhasil dimuat.")
+            self.mp_face_mesh = mp.solutions.face_mesh
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                static_image_mode=False,  # False lebih baik untuk video real-time
+                max_num_faces=1,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            print("✅ MediaPipe Face Mesh model berhasil dimuat.")
 
+        except Exception as e:
+            print(f"❌ Gagal memuat detektor wajah: {e}")
+            return
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             print("❌ Error: Tidak bisa membuka kamera.")
             return
-
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
@@ -108,44 +91,68 @@ class CameraWindow(QMainWindow):
         self.timer.timeout.connect(self.update_frame)
         self.timer.start()
 
+    def align_face_roi(self, face_roi):
+        try:
+            roi_h, roi_w, _ = face_roi.shape
+            results = self.face_mesh.process(cv2.cvtColor(face_roi, cv2.COLOR_BGR2RGB))
+
+            if not results.multi_face_landmarks:
+                return None
+            landmarks_unnormalized = np.array(
+                [(lm.x * roi_w, lm.y * roi_h) for lm in results.multi_face_landmarks[0].landmark]
+            )
+            left_eye = landmarks_unnormalized[133]
+            right_eye = landmarks_unnormalized[362]
+            dY = right_eye[1] - left_eye[1]
+            dX = right_eye[0] - left_eye[0]
+            angle = np.degrees(np.arctan2(dY, dX))
+
+            eyes_center = ((left_eye[0] + right_eye[0]) // 2, (left_eye[1] + right_eye[1]) // 2)
+            M = cv2.getRotationMatrix2D(eyes_center, angle, scale=1.0)
+            aligned_face = cv2.warpAffine(face_roi, M, (roi_w, roi_h), flags=cv2.INTER_CUBIC)
+            return aligned_face
+        except Exception:
+            return None
+
     def update_frame(self):
         ret, frame = self.cap.read()
         if not ret:
             return
-
         display_frame = frame.copy()
         current_time = time.time()
-
         if (current_time - self.last_detection_time) > cfg.DETECTION_INTERVAL_SECONDS:
             self.last_detection_time = current_time
             self.last_known_predictions = {}
-
-            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Tahap 1: Deteksi cepat dengan Haar Cascade
+            # gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             self.last_known_faces = self.face_cascade.detectMultiScale(
-                gray_frame,
+                # gray_frame,
+                frame,
                 scaleFactor=cfg.HAAR_SCALE_FACTOR,
                 minNeighbors=cfg.HAAR_MIN_NEIGHBORS,
                 minSize=cfg.HAAR_MIN_SIZE
             )
             for (x, y, w, h) in self.last_known_faces:
-                pad_w = int(w * 0.20)
-                pad_h = int(h * 0.20)
-                x1, y1 = max(0, x - pad_w), max(0, y - pad_h)
-                x2, y2 = min(frame.shape[1], x + w + pad_w), min(frame.shape[0], y + h + pad_h)
-                face_roi = frame[y1:y2, x1:x2]
+                face_roi = frame[y:y+h, x:x+w]
                 if face_roi.size != 0:
-                    pil_image = Image.fromarray(cv2.cvtColor(face_roi, cv2.COLOR_BGR2RGB))
-                    input_tensor = self.transform(pil_image)
-                    input_tensor = input_tensor.unsqueeze(0).numpy()
-                    outputs = self.ort_session.run(None, {self.input_name: input_tensor})
-                    scores = outputs[0][0]
-                    probabilities = softmax(scores)
-                    predicted_index = np.argmax(probabilities)
-                    confidence = probabilities[predicted_index]
-                    label_text = self.class_names[predicted_index]
-                    display_text = f"{label_text}: {confidence:.2%}"
+                    aligned_face = self.align_face_roi(face_roi)
+                    if aligned_face is not None:
+                        # Konversi wajah yang sudah lurus & grayscale (via transform) untuk model
+                        pil_image = Image.fromarray(cv2.cvtColor(aligned_face, cv2.COLOR_BGR2RGB))
+                        input_tensor = self.transform(pil_image).unsqueeze(0).numpy()
+                        # Jalankan inferensi ONNX
+                        outputs = self.ort_session.run(None, {self.input_name: input_tensor})
+                        scores = outputs[0][0]
+                        probabilities = softmax(scores)
+                        predicted_index = np.argmax(probabilities)
+                        confidence = probabilities[predicted_index]
+                        label_text = self.class_names[predicted_index]
 
-                    self.last_known_predictions[(x, y, w, h)] = display_text
+                        display_text = f"{label_text}: {confidence:.2%}"
+
+                        self.last_known_predictions[(x, y, w, h)] = display_text
+
+        # Gambar kotak dan teks di frame display
         for (x, y, w, h) in self.last_known_faces:
             cv2.rectangle(display_frame, (x, y), (x+w, y+h), cfg.BOX_COLOR, cfg.FONT_THICKNESS)
             if (x, y, w, h) in self.last_known_predictions:
@@ -166,6 +173,7 @@ class CameraWindow(QMainWindow):
     def closeEvent(self, event):
         self.timer.stop()
         self.cap.release()
+        self.face_mesh.close()  # Penting: Tutup model MediaPipe
         event.accept()
 
 
