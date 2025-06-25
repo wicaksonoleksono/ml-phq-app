@@ -64,26 +64,39 @@ def calculate_geometric_features(face_roi, face_mesh):
     try:
         roi_h, roi_w, _ = face_roi.shape
         results = face_mesh.process(cv2.cvtColor(face_roi, cv2.COLOR_BGR2RGB))
+
         if not results.multi_face_landmarks:
             return None, None
+
         coords = np.array([(lm.x * roi_w, lm.y * roi_h) for lm in results.multi_face_landmarks[0].landmark])
         ref_dist = np.linalg.norm(coords[133] - coords[362])
+
         if ref_dist < 1e-6:
             return None, None
+
         features = []
 
         def eye_aspect_ratio(eye_coords):
-            v1, v2, h = np.linalg.norm(
-                eye_coords[1]-eye_coords[5]), np.linalg.norm(eye_coords[2]-eye_coords[4]), np.linalg.norm(eye_coords[0]-eye_coords[3])
-            return (v1+v2)/(2.0*h)if h > 1e-6 else 0.0
+            v1, v2, h = (np.linalg.norm(eye_coords[1]-eye_coords[5]),
+                         np.linalg.norm(eye_coords[2]-eye_coords[4]),
+                         np.linalg.norm(eye_coords[0]-eye_coords[3]))
+            return (v1+v2)/(2.0*h) if h > 1e-6 else 0.0
+
         features.extend([eye_aspect_ratio(coords[[33, 160, 158, 133, 153, 144]]),
                         eye_aspect_ratio(coords[[362, 385, 387, 263, 373, 380]])])
+
         mouth_pts = coords[[61, 291, 39, 181, 0, 17]]
-        v_dist, h_dist = np.linalg.norm(
-            mouth_pts[2]-mouth_pts[5])+np.linalg.norm(mouth_pts[3]-mouth_pts[4]), np.linalg.norm(mouth_pts[0]-mouth_pts[1])
-        features.append(v_dist/(2.0*h_dist)if h_dist > 1e-6 else 0.0)
+        v_dist, h_dist = (np.linalg.norm(mouth_pts[2]-mouth_pts[5]) +
+                          np.linalg.norm(mouth_pts[3]-mouth_pts[4]),
+                          np.linalg.norm(mouth_pts[0]-mouth_pts[1]))
+        features.append(v_dist/(2.0*h_dist) if h_dist > 1e-6 else 0.0)
+
         left_brow_pts, right_brow_pts = coords[[70, 63, 105, 66, 107]], coords[[336, 296, 334, 293, 300]]
-        def eyebrow_angle(p): po, pi = p[0], p[-1]; return np.degrees(np.arctan2(pi[1]-po[1], pi[0]-po[0]))
+
+        def eyebrow_angle(p):
+            po, pi = p[0], p[-1]
+            return np.degrees(np.arctan2(pi[1]-po[1], pi[0]-po[0]))
+
         features.extend([eyebrow_angle(left_brow_pts), eyebrow_angle(right_brow_pts)])
 
         def eyebrow_curvature(p):
@@ -94,14 +107,41 @@ def calculate_geometric_features(face_roi, face_mesh):
                 return 0.0
             proj = (np.dot(pv, lv)/(ll**2))*lv
             return np.linalg.norm(pv-proj)/ref_dist
+
         features.extend([eyebrow_curvature(left_brow_pts), eyebrow_curvature(right_brow_pts)])
-        features.extend([np.linalg.norm(coords[105, 1]-coords[159, 1])/ref_dist, np.linalg.norm(coords[334, 1]-coords[386, 1])/ref_dist, np.linalg.norm(
-            coords[107]-coords[336])/ref_dist, np.linalg.norm(coords[172]-coords[397])/ref_dist, np.linalg.norm(coords[234]-coords[454])/ref_dist])
+
+        features.extend([
+            np.linalg.norm(coords[105, 1]-coords[159, 1])/ref_dist,
+            np.linalg.norm(coords[334, 1]-coords[386, 1])/ref_dist,
+            np.linalg.norm(coords[107]-coords[336])/ref_dist,
+            np.linalg.norm(coords[172]-coords[397])/ref_dist,
+            np.linalg.norm(coords[234]-coords[454])/ref_dist
+        ])
+
         final_features = np.array(features).reshape(1, -1)
-        used_indices = sorted(list(set([133, 362, 33, 160, 158, 153, 144, 385, 387, 263, 373, 380, 61, 291,
-                              39, 181, 0, 17, 70, 63, 105, 66, 107, 336, 296, 334, 293, 300, 159, 386, 172, 397, 234, 454])))
+
+        # Pastikan used_indices mencakup semua landmark yang dibutuhkan
+        used_indices = sorted(list(set([
+            # Reference points
+            133, 362,
+            # Left eye
+            33, 160, 158, 153, 144,
+            # Right eye
+            385, 387, 263, 373, 380,
+            # Mouth
+            61, 291, 39, 181, 0, 17,
+            # Left eyebrow
+            70, 63, 105, 66, 107,
+            # Right eyebrow
+            336, 296, 334, 293, 300,
+            # Additional features
+            159, 386, 172, 397, 234, 454
+        ])))
+
         return final_features, coords[used_indices]
+
     except Exception as e:
+        print(f"Error in calculate_geometric_features: {e}")
         return None, None
 
 
